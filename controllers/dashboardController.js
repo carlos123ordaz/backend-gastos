@@ -14,69 +14,72 @@ exports.getResumen = async (req, res) => {
       if (fechaFin) filter.fecha.$lte = new Date(fechaFin);
     }
 
-    // Obtener configuración del monto inicial
-    let settings = await Settings.findOne();
+    // Ejecutar consultas en paralelo
+    const [settings, totalesPorTipo, gastosPorCategoria, transaccionesPorMes] = await Promise.all([
+      // Obtener configuración (con caché si es posible)
+      Settings.findOne().lean(),
+      
+      // Calcular ingresos y gastos en una sola consulta
+      Transaction.aggregate([
+        { $match: filter },
+        {
+          $group: {
+            _id: '$tipo',
+            total: { $sum: '$monto' }
+          }
+        }
+      ]),
+      
+      // Gastos por categoría
+      Transaction.aggregate([
+        { $match: { ...filter, tipo: 'gasto' } },
+        { 
+          $group: { 
+            _id: '$tipoGasto', 
+            total: { $sum: '$monto' } 
+          } 
+        },
+        { $sort: { total: -1 } }
+      ]),
+      
+      // Transacciones por mes (últimos 6 meses)
+      Transaction.aggregate([
+        {
+          $match: {
+            fecha: { 
+              $gte: new Date(new Date().setMonth(new Date().getMonth() - 6))
+            }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              mes: { $month: '$fecha' },
+              año: { $year: '$fecha' },
+              tipo: '$tipo'
+            },
+            total: { $sum: '$monto' }
+          }
+        },
+        { $sort: { '_id.año': 1, '_id.mes': 1 } }
+      ])
+    ]);
+
+    // Crear settings si no existe
+    let finalSettings = settings;
     if (!settings) {
-      settings = await Settings.create({ montoInicial: 0 });
+      finalSettings = await Settings.create({ montoInicial: 0 });
     }
 
-    // Calcular totales
-    const ingresos = await Transaction.aggregate([
-      { $match: { ...filter, tipo: 'ingreso' } },
-      { $group: { _id: null, total: { $sum: '$monto' } } }
-    ]);
-
-    const gastos = await Transaction.aggregate([
-      { $match: { ...filter, tipo: 'gasto' } },
-      { $group: { _id: null, total: { $sum: '$monto' } } }
-    ]);
-
-    const totalIngresos = ingresos.length > 0 ? ingresos[0].total : 0;
-    const totalGastos = gastos.length > 0 ? gastos[0].total : 0;
-
-    // Calcular balance
-    const balance = settings.montoInicial + totalIngresos - totalGastos;
-
-    // Gastos por categoría
-    const gastosPorCategoria = await Transaction.aggregate([
-      { $match: { ...filter, tipo: 'gasto' } },
-      { $group: { _id: '$tipoGasto', total: { $sum: '$monto' } } },
-      { $sort: { total: -1 } }
-    ]);
-
-    // Transacciones recientes
-    const transaccionesRecientes = await Transaction.find(filter)
-      .sort({ fecha: -1 })
-      .limit(10)
-      .populate('creadoPor', 'nombre email');
-
-    // Ingresos y gastos por mes (últimos 6 meses)
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-
-    const transaccionesPorMes = await Transaction.aggregate([
-      {
-        $match: {
-          fecha: { $gte: sixMonthsAgo }
-        }
-      },
-      {
-        $group: {
-          _id: {
-            mes: { $month: '$fecha' },
-            año: { $year: '$fecha' },
-            tipo: '$tipo'
-          },
-          total: { $sum: '$monto' }
-        }
-      },
-      { $sort: { '_id.año': 1, '_id.mes': 1 } }
-    ]);
+    // Procesar totales
+    const totalIngresos = totalesPorTipo.find(t => t._id === 'ingreso')?.total || 0;
+    const totalGastos = totalesPorTipo.find(t => t._id === 'gasto')?.total || 0;
+    const balance = finalSettings.montoInicial + totalIngresos - totalGastos;
 
     res.json({
       success: true,
       data: {
-        montoInicial: settings.montoInicial,
+        montoInicial: finalSettings.montoInicial,
         totalIngresos,
         totalGastos,
         balance,
@@ -84,11 +87,11 @@ exports.getResumen = async (req, res) => {
           categoria: item._id,
           total: item.total
         })),
-        transaccionesRecientes,
         transaccionesPorMes
       }
     });
   } catch (error) {
+    console.error('Error en getResumen:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener resumen del dashboard',
@@ -100,29 +103,54 @@ exports.getResumen = async (req, res) => {
 // @desc    Obtener estadísticas detalladas
 exports.getEstadisticas = async (req, res) => {
   try {
-    const totalTransacciones = await Transaction.countDocuments();
-    const totalIngresos = await Transaction.countDocuments({ tipo: 'ingreso' });
-    const totalGastos = await Transaction.countDocuments({ tipo: 'gasto' });
-
-    // Promedio de ingresos y gastos
-    const promedioIngreso = await Transaction.aggregate([
-      { $match: { tipo: 'ingreso' } },
-      { $group: { _id: null, promedio: { $avg: '$monto' } } }
+    // Ejecutar todas las consultas en paralelo
+    const [conteos, promedios, extremos] = await Promise.all([
+      // Conteos por tipo en una sola consulta
+      Transaction.aggregate([
+        {
+          $facet: {
+            total: [{ $count: 'count' }],
+            porTipo: [
+              { $group: { _id: '$tipo', count: { $sum: 1 } } }
+            ]
+          }
+        }
+      ]),
+      
+      // Promedios de ingresos y gastos en una sola consulta
+      Transaction.aggregate([
+        {
+          $group: {
+            _id: '$tipo',
+            promedio: { $avg: '$monto' }
+          }
+        }
+      ]),
+      
+      // Mayor ingreso y mayor gasto en paralelo
+      Promise.all([
+        Transaction.findOne({ tipo: 'ingreso' })
+          .sort({ monto: -1 })
+          .populate('creadoPor', 'nombre')
+          .lean(),
+        Transaction.findOne({ tipo: 'gasto' })
+          .sort({ monto: -1 })
+          .populate('creadoPor', 'nombre')
+          .lean()
+      ])
     ]);
 
-    const promedioGasto = await Transaction.aggregate([
-      { $match: { tipo: 'gasto' } },
-      { $group: { _id: null, promedio: { $avg: '$monto' } } }
-    ]);
+    // Procesar resultados de conteos
+    const totalTransacciones = conteos[0].total[0]?.count || 0;
+    const totalIngresos = conteos[0].porTipo.find(t => t._id === 'ingreso')?.count || 0;
+    const totalGastos = conteos[0].porTipo.find(t => t._id === 'gasto')?.count || 0;
 
-    // Mayor ingreso y mayor gasto
-    const mayorIngreso = await Transaction.findOne({ tipo: 'ingreso' })
-      .sort({ monto: -1 })
-      .populate('creadoPor', 'nombre');
+    // Procesar promedios
+    const promedioIngreso = promedios.find(p => p._id === 'ingreso')?.promedio || 0;
+    const promedioGasto = promedios.find(p => p._id === 'gasto')?.promedio || 0;
 
-    const mayorGasto = await Transaction.findOne({ tipo: 'gasto' })
-      .sort({ monto: -1 })
-      .populate('creadoPor', 'nombre');
+    // Procesar extremos
+    const [mayorIngreso, mayorGasto] = extremos;
 
     res.json({
       success: true,
@@ -130,13 +158,14 @@ exports.getEstadisticas = async (req, res) => {
         totalTransacciones,
         totalIngresos,
         totalGastos,
-        promedioIngreso: promedioIngreso.length > 0 ? promedioIngreso[0].promedio : 0,
-        promedioGasto: promedioGasto.length > 0 ? promedioGasto[0].promedio : 0,
+        promedioIngreso,
+        promedioGasto,
         mayorIngreso,
         mayorGasto
       }
     });
   } catch (error) {
+    console.error('Error en getEstadisticas:', error);
     res.status(500).json({
       success: false,
       message: 'Error al obtener estadísticas',
