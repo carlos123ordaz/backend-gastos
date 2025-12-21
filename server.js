@@ -5,8 +5,6 @@ const connectDB = require('./config/db');
 
 // Cargar variables de entorno
 dotenv.config();
-
-// Conectar a la base de datos
 connectDB();
 
 const app = express();
