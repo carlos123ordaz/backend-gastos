@@ -16,4 +16,5 @@ router.post('/', protect, admin, upload.single('documento'), createTransaction);
 router.put('/:id', protect, admin, upload.single('documento'), updateTransaction);
 router.delete('/:id', protect, admin, deleteTransaction);
 
+
 module.exports = router;
