@@ -4,21 +4,28 @@ const { uploadToGCS, deleteFromGCS, getFileNameFromUrl } = require('../config/go
 // @desc    Obtener todas las transacciones
 exports.getTransactions = async (req, res) => {
   try {
-    const { tipo, tipoGasto, fechaInicio, fechaFin, page = 1, limit = 50 } = req.query;
+    const { tipo, tipoGasto, fechaInicio, fechaFin, search, page = 1, limit = 20 } = req.query;
 
     // Construir filtro
     const filter = {};
+    
     if (tipo) filter.tipo = tipo;
     if (tipoGasto && tipoGasto !== 'N/A') filter.tipoGasto = tipoGasto;
+    
     if (fechaInicio || fechaFin) {
       filter.fecha = {};
       if (fechaInicio) filter.fecha.$gte = new Date(fechaInicio);
       if (fechaFin) filter.fecha.$lte = new Date(fechaFin);
     }
 
+    // Búsqueda por descripción
+    if (search && search.trim()) {
+      filter.descripcion = { $regex: search.trim(), $options: 'i' };
+    }
+
     const transactions = await Transaction.find(filter)
       .populate('creadoPor', 'nombre email')
-      .sort({ _id: -1 })
+      .sort({ fecha: -1, _id: -1 })
       .limit(limit * 1)
       .skip((page - 1) * limit);
 

@@ -5,6 +5,7 @@ const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
   // Aceptar solo imágenes y PDFs
+  console.log(file)
   if (file.mimetype.startsWith('image/') || file.mimetype === 'application/pdf') {
     cb(null, true);
   } else {
@@ -15,8 +16,11 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
   storage: storage,
   fileFilter: fileFilter,
-  limits: {
-    fileSize: 25 * 1024 * 1024 // 5MB límite
+ limits: {
+    fileSize: 10 * 1024 * 1024,
+    fieldSize: 10 * 1024 * 1024, 
+    fields: 10,
+    files: 1 
   }
 });
 
