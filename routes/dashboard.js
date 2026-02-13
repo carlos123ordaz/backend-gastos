@@ -10,3 +10,5 @@ router.get('/resumen', protect, getResumen);
 router.get('/estadisticas', protect, getEstadisticas);
 
 module.exports = router;
+
+// Todo bien
