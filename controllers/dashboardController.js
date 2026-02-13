@@ -2,24 +2,51 @@ const Transaction = require('../models/Transaction');
 const Settings = require('../models/Settings');
 
 // @desc    Obtener resumen del dashboard
+// dashboardController.js - reemplazar getResumen completo
+
 exports.getResumen = async (req, res) => {
   try {
     const { fechaInicio, fechaFin } = req.query;
 
-    // Construir filtro de fecha
+    // Construir filtro de fecha AJUSTADO A UTC
+    // Desde Perú (UTC-5), si el usuario envía "2025-02-12",
+    // queremos incluir todo ese día en hora local.
+    // Inicio del día local = 2025-02-12T00:00:00-05:00 = 2025-02-12T05:00:00Z
+    // Fin del día local = 2025-02-12T23:59:59-05:00 = 2025-02-13T04:59:59Z
     const filter = {};
     if (fechaInicio || fechaFin) {
       filter.fecha = {};
-      if (fechaInicio) filter.fecha.$gte = new Date(fechaInicio);
-      if (fechaFin) filter.fecha.$lte = new Date(fechaFin);
+      if (fechaInicio) {
+        const inicio = new Date(fechaInicio + 'T00:00:00-05:00');
+        filter.fecha.$gte = inicio;
+      }
+      if (fechaFin) {
+        const fin = new Date(fechaFin + 'T23:59:59.999-05:00');
+        filter.fecha.$lte = fin;
+      }
     }
 
     // Ejecutar consultas en paralelo
-    const [settings, totalesPorTipo, gastosPorCategoria, transaccionesPorMes] = await Promise.all([
-      // Obtener configuración (con caché si es posible)
+    const [
+      settings,
+      totalesGlobal,       // SIN filtro de fecha — acumulado total
+      totalesPeriodo,      // CON filtro de fecha — solo período seleccionado
+      gastosPorCategoria,
+      transaccionesPorMes
+    ] = await Promise.all([
       Settings.findOne().lean(),
-      
-      // Calcular ingresos y gastos en una sola consulta
+
+      // TOTALES GLOBALES (todos los meses, sin filtro)
+      Transaction.aggregate([
+        {
+          $group: {
+            _id: '$tipo',
+            total: { $sum: '$monto' }
+          }
+        }
+      ]),
+
+      // TOTALES DEL PERÍODO FILTRADO
       Transaction.aggregate([
         { $match: filter },
         {
@@ -29,24 +56,24 @@ exports.getResumen = async (req, res) => {
           }
         }
       ]),
-      
-      // Gastos por categoría
+
+      // Gastos por categoría (del período)
       Transaction.aggregate([
         { $match: { ...filter, tipo: 'gasto' } },
-        { 
-          $group: { 
-            _id: '$tipoGasto', 
-            total: { $sum: '$monto' } 
-          } 
+        {
+          $group: {
+            _id: '$tipoGasto',
+            total: { $sum: '$monto' }
+          }
         },
         { $sort: { total: -1 } }
       ]),
-      
+
       // Transacciones por mes (últimos 6 meses)
       Transaction.aggregate([
         {
           $match: {
-            fecha: { 
+            fecha: {
               $gte: new Date(new Date().setMonth(new Date().getMonth() - 6))
             }
           }
@@ -65,24 +92,32 @@ exports.getResumen = async (req, res) => {
       ])
     ]);
 
-    // Crear settings si no existe
     let finalSettings = settings;
     if (!settings) {
       finalSettings = await Settings.create({ montoInicial: 0 });
     }
 
-    // Procesar totales
-    const totalIngresos = totalesPorTipo.find(t => t._id === 'ingreso')?.total || 0;
-    const totalGastos = totalesPorTipo.find(t => t._id === 'gasto')?.total || 0;
-    const balance = finalSettings.montoInicial + totalIngresos - totalGastos;
+    // Totales GLOBALES (para balance real y tarjetas principales)
+    const totalIngresosGlobal = totalesGlobal.find(t => t._id === 'ingreso')?.total || 0;
+    const totalGastosGlobal = totalesGlobal.find(t => t._id === 'gasto')?.total || 0;
+    const balance = finalSettings.montoInicial + totalIngresosGlobal - totalGastosGlobal;
+
+    // Totales del PERÍODO (para contexto del filtro)
+    const totalIngresosPeriodo = totalesPeriodo.find(t => t._id === 'ingreso')?.total || 0;
+    const totalGastosPeriodo = totalesPeriodo.find(t => t._id === 'gasto')?.total || 0;
 
     res.json({
       success: true,
       data: {
         montoInicial: finalSettings.montoInicial,
-        totalIngresos,
-        totalGastos,
+        // Globales
+        totalIngresos: totalIngresosGlobal,
+        totalGastos: totalGastosGlobal,
         balance,
+        // Del período
+        totalIngresosPeriodo,
+        totalGastosPeriodo,
+        // Charts
         gastosPorCategoria: gastosPorCategoria.map(item => ({
           categoria: item._id,
           total: item.total

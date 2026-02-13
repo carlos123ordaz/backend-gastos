@@ -12,8 +12,12 @@ exports.getTransactions = async (req, res) => {
     if (tipoGasto && tipoGasto !== 'N/A') filter.tipoGasto = tipoGasto;
     if (fechaInicio || fechaFin) {
       filter.fecha = {};
-      if (fechaInicio) filter.fecha.$gte = new Date(fechaInicio);
-      if (fechaFin) filter.fecha.$lte = new Date(fechaFin);
+      if (fechaInicio) {
+        filter.fecha.$gte = new Date(fechaInicio + 'T00:00:00-05:00');
+      }
+      if (fechaFin) {
+        filter.fecha.$lte = new Date(fechaFin + 'T23:59:59.999-05:00');
+      }
     }
 
     const transactions = await Transaction.find(filter)
