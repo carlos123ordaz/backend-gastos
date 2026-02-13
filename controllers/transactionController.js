@@ -22,6 +22,7 @@ exports.getTransactions = async (req, res) => {
       }
     }
 
+    
     // Búsqueda por descripción
     if (search && search.trim()) {
       filter.descripcion = { $regex: search.trim(), $options: 'i' };
